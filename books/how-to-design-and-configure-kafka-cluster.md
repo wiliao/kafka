@@ -426,11 +426,13 @@ Cluster design fails if clients can't tolerate broker loss:
 
 <!-- NEW: Classic rebalance protocol deprecation -->
 
-> **Rebalance protocol migration (Kafka 4.3, KIP-1274):** The `classic` consumer rebalance
+> **Rebalance protocol migration (Kafka 4.3, KIP-1274/KIP-848):** The `classic` consumer rebalance
 > protocol is deprecated (Phase 1). Consumers using `partition.assignment.strategy` with the
-> classic protocol will now emit a warning log. Plan migration to the **cooperative**
-> rebalance protocol (`CooperativeStickyAssignor`) before Kafka 5.0, where the classic
-> protocol is expected to be removed.
+> classic protocol will now emit a warning log. Plan migration to the new **Consumer**
+> rebalance protocol by setting `group.protocol=consumer` — this is the long-term target,
+> GA since Kafka 4.0, with a fully incremental design, server-side assignors, and no global
+> synchronization barrier. In Kafka 5.0, `KafkaConsumer` will default to the Consumer
+> protocol; in Kafka 6.0, the classic protocol will be removed entirely.
 >
 > Additionally, the broker config `group.coordinator.rebalance.protocols` is deprecated in
 > 4.3 (KIP-1237) and will be removed in 5.0.
@@ -467,7 +469,7 @@ Cluster design fails if clients can't tolerate broker loss:
 - [ ] Consumer lag monitoring in place
 - [ ] Rolling upgrade/runbook tested
 - [ ] Broker cordoning workflow documented for decommissioning (Kafka 4.3+) <!-- NEW -->
-- [ ] Consumer rebalance protocol migration plan (classic → cooperative) documented <!-- NEW -->
+- [ ] Consumer rebalance protocol migration plan (classic → consumer, `group.protocol=consumer`) documented <!-- NEW -->
 
 ---
 
@@ -500,7 +502,7 @@ The following corrections were applied after technical reviews to improve accura
 | 15  | **Added** broker/log directory cordoning via `cordoned.log.dirs` (KIP-1066) as the modern decommissioning workflow                                                                                                                                                                              | §8.2             |
 | 16  | **Added** partition size percentage metrics (KIP-1257) to monitoring table                                                                                                                                                                                                                      | §8.1             |
 | 17  | **Added** Eligible Leader Replicas (ELR) note on changed `min.insync.replicas` semantics                                                                                                                                                                                                        | §6               |
-| 18  | **Added** classic rebalance protocol deprecation (Phase 1, KIP-1274) and `group.coordinator.rebalance.protocols` deprecation (KIP-1237); recommended cooperative protocol migration                                                                                                             | §9               |
+| 18  | **Added** classic rebalance protocol deprecation (Phase 1, KIP-1274) and `group.coordinator.rebalance.protocols` deprecation (KIP-1237); corrected migration target from cooperative to the Consumer protocol (`group.protocol=consumer`, KIP-848)                                              | §9               |
 | 19  | **Added** OAUTHBEARER client assertions note (KIP-1258)                                                                                                                                                                                                                                         | §7               |
 
 ---

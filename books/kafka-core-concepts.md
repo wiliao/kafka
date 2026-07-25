@@ -25,6 +25,7 @@ Apache Kafka is a **distributed streaming platform** that lets you publish and s
 The **unit of data** within Kafka is called a **message** (comparable to a row or record in a database). A message is simply an array of bytes with no specific format or meaning to Kafka itself.
 
 A message can have optional **metadata**:
+
 - **Key**: Also a byte array, used for partition assignment (messages with the same key go to the same partition)
 - **Timestamp**: Indicates when the event was produced
 - **Headers**: Optional metadata key-value pairs
@@ -32,6 +33,7 @@ A message can have optional **metadata**:
 ### 2.2 Batches
 
 For efficiency, messages are written into Kafka in **batches** — collections of messages being produced to the same topic and partition. This reduces network overhead at the cost of a latency trade-off:
+
 - Larger batches → higher throughput, higher latency per message
 - Smaller batches → lower latency, more network round trips
 
@@ -49,6 +51,7 @@ While messages are opaque byte arrays, imposing a **schema** on message content 
 **Topics** are the primary category for messages (analogous to a database table or filesystem folder).
 
 **Partitions** break topics into multiple logs:
+
 - A partition is a single, ordered, append-only commit log
 - Messages within a partition are read in order from beginning to end
 - **No ordering guarantee across partitions** — only within a single partition
@@ -68,11 +71,13 @@ The term **stream** typically refers to a single topic of data, regardless of pa
   - **Custom partitioner**: Implements custom business rules for partition assignment
 
 **Send methods**:
+
 1. **Fire-and-forget**: Send and don't check success
 2. **Synchronous send**: Use `Future.get()` to wait for acknowledgment
 3. **Asynchronous send**: Use a callback to handle success/failure
 
 **Important producer configurations**:
+
 - `acks` (0, 1, all): Controls durability guarantees
 - `batch.size`: Maximum bytes per batch
 - `linger.ms`: Time to wait for additional messages before sending a batch
@@ -86,33 +91,44 @@ The term **stream** typically refers to a single topic of data, regardless of pa
 **Consumers** read messages from topics. Key concepts:
 
 - Consumers track their progress using **offsets** — an integer that continually increases, unique per message within a partition
-- Multiple consumers work together as a **consumer group**
+- Multiple consumers work together as a **consumer group** (using `subscribe()`) for coordinated consumption
 - Each partition is consumed by **only one consumer** within a group at a time
 - Consumers can **horizontally scale** — adding more consumers increases throughput
 - The **poll loop** is central to consumer operation; consumers must poll continuously to remain alive
+- Consumers can also consume without a consumer group using **manual partition assignment** (`assign()`), where partitions are assigned directly in code with no group coordination or rebalancing
 
 **Consumer Groups and Partition Rebalance**:
+
 - A **rebalance** moves partition ownership between consumers when members join/leave
-- **Eager rebalance**: All consumers stop, give up partitions, then get reassigned
-- **Cooperative rebalance** (incremental): Only a subset of partitions are reassigned, others continue processing
+- Two rebalance protocols are available (since Apache Kafka 4.0):
+  - **Classic protocol** (`group.protocol=classic`): The original protocol with eager and cooperative (incremental) rebalance strategies using client-side assignors
+  - **Consumer protocol** (`group.protocol=consumer`): The new generation protocol ([KIP-848](https://cwiki.apache.org/confluence/x/HhD1D)), GA since Kafka 4.0, with fully incremental design, no global synchronization barrier, and server-side assignors
+- **Eager rebalance** (classic): All consumers stop, give up partitions, then get reassigned
+- **Cooperative rebalance** / incremental (classic): Only a subset of partitions are reassigned, others continue processing
 - Static group membership (`group.instance.id`) allows consumers to keep their assignments across restarts
+- When the **consumer protocol** is enabled, server-side assignors replace client-side ones; `uniform` (default) and `range` assignors are provided
 
 **Important consumer configurations**:
-- `group.id`: Consumer group identifier
-- `auto.offset.reset` (earliest/latest): Behavior when no committed offset exists
+
+- `group.id`: Consumer group identifier (can be omitted or null for manual partition assignment)
+- `group.protocol`: Selects the rebalance protocol — `classic` (default) or `consumer`
+- `auto.offset.reset` (earliest/latest/none): Behavior when no committed offset exists
 - `enable.auto.commit`: Automatic vs. manual offset commits
-- `session.timeout.ms` / `heartbeat.interval.ms`: Consumer liveness detection
+- `session.timeout.ms` / `heartbeat.interval.ms`: Consumer liveness detection (not applicable when `group.protocol=consumer`)
+- `isolation.level` (read_committed / read_uncommitted): Controls visibility of transactional messages
 
 ### 2.7 Brokers and Clusters
 
 **Broker**: A single Kafka server that:
+
 - Receives messages from producers
 - Assigns offsets to messages
 - Writes messages to disk storage
 - Serves fetch requests from consumers
 
-**Cluster**: A group of brokers working together:
-- **Controller**: One broker elected automatically to handle administrative operations (partition assignment, broker failure monitoring)
+**Cluster**: A group of servers working together:
+
+- **Controller**: A server with the controller role (can be a dedicated controller or a combined broker/controller) that manages administrative operations and maintains the metadata log via a Raft quorum
 - **Leader**: The broker that owns a partition and handles all produce/fetch requests
 - **Followers**: Replicas that replicate messages from the leader to provide redundancy
 
@@ -131,25 +147,29 @@ Kafka provides **durable storage** of messages for configurable periods:
 
 ### 3.1 Cluster Membership
 
-- Kafka uses **Apache ZooKeeper** to maintain the list of live brokers
-- Each broker registers itself by creating an **ephemeral node** in ZooKeeper
-- When a broker loses connectivity to ZooKeeper, its ephemeral node is removed
-- Components watching the `/brokers/ids` path get notified of membership changes
+- Kafka uses a **Raft-based controller quorum** (KRaft) to maintain cluster metadata
+- Each broker maintains a session with the controller by sending periodic heartbeats
+- Brokers are registered in the cluster metadata log managed by the controller quorum
+- When a broker fails to send heartbeats within `broker.session.timeout.ms`, it is marked as offline
+- The controller quorum (3 or 5 nodes recommended) manages broker registration, partition leadership, and all metadata changes
 
 ### 3.2 The Controller
 
-- One broker serves as the **controller**, responsible for **electing partition leaders**
-- The first broker to start creates the `/controller` ephemeral node in ZooKeeper
+- In KRaft mode, controller nodes form a **Raft quorum** that manages the metadata log
+- One controller is elected as the **active controller** (leader of the Raft quorum), responsible for **electing partition leaders**
 - Controller uses an **epoch number** (monotonically increasing) to prevent **split-brain** scenarios (zombie fencing)
-- When a broker leaves the cluster, the controller determines new leaders for affected partitions
-- The new controller state is persisted to ZooKeeper and communicated to all brokers
+- When a broker leaves the cluster, the active controller determines new leaders for affected partitions
+- Metadata changes are replicated via Raft across the controller quorum and persisted to the metadata log
 
-### 3.3 KRaft (Kafka's New Raft-Based Controller)
+### 3.3 KRaft (Kafka's Raft-Based Controller)
 
-- KRaft is a **preview** in Apache Kafka 2.8; the first **production** version ships in Kafka 3.0 — clusters can run with either the ZooKeeper-based controller or KRaft
+- KRaft became **production-ready** in Apache Kafka 3.3 (as an alternative to ZooKeeper)
+- Starting with **Apache Kafka 4.3**, ZooKeeper mode has been **removed** entirely — KRaft is the only supported mode
 - Controller nodes form a **Raft quorum** managing a log of metadata events
+- Each server is configured with a `process.roles` property as `broker`, `controller`, or `broker,controller` (combined)
 - Eliminates ZooKeeper dependency — Kafka runs as a single executable
 - Addresses scalability bottlenecks and metadata consistency issues
+- Supports both **static** and **dynamic** controller quorums (dynamic quorums added in Kafka 4.1)
 
 ### 3.4 Replication
 
@@ -218,7 +238,7 @@ Kafka provides **at-least-once** delivery by default and supports **exactly-once
 
 - Each message includes a unique **Producer ID (PID)** and **sequence number**
 - Brokers detect and reject duplicate messages
-- Requires `max.inflight.requests <= 5`, `retries > 0`, `acks=all`
+- Requires `max.in.flight.requests.per.connection <= 5`, `retries > 0`, `acks=all`
 
 ### 5.2 Transactions
 
@@ -350,15 +370,14 @@ Kafka's `AdminClient` provides programmatic access to cluster management:
 
 ## 12. Use Cases
 
-| Use Case | Description |
-|----------|-------------|
+| Use Case              | Description                                                                  |
+| --------------------- | ---------------------------------------------------------------------------- |
 | **Activity Tracking** | The original Kafka use case — tracking user actions on websites/applications |
-| **Messaging** | Decoupled notification delivery (e.g., email) with consistent formatting |
-| **Metrics & Logging** | Collecting application metrics and logs for monitoring and analysis |
-| **Commit Log** | Database change data capture (CDC) and changelog streams |
-| **Stream Processing** | Real-time analytics, aggregations, joins, and transformations |
+| **Messaging**         | Decoupled notification delivery (e.g., email) with consistent formatting     |
+| **Metrics & Logging** | Collecting application metrics and logs for monitoring and analysis          |
+| **Commit Log**        | Database change data capture (CDC) and changelog streams                     |
+| **Stream Processing** | Real-time analytics, aggregations, joins, and transformations                |
 
 ---
 
-*This document summarizes key concepts from "Kafka: The Definitive Guide, 2nd Edition" (O'Reilly, 2021) by Gwen Shapira, Todd Palino, Rajini Sivaram, and Krit Petty.*
-
+_This document summarizes key concepts from "Kafka: The Definitive Guide, 2nd Edition" (O'Reilly, 2021) by Gwen Shapira, Todd Palino, Rajini Sivaram, and Krit Petty._
