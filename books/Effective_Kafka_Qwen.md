@@ -194,16 +194,27 @@
   - [Confidentiality](#confidentiality)
     - [Client-to-broker encryption](#client-to-broker-encryption)
     - [Interbroker encryption](#interbroker-encryption)
+    - [Broker-to-ZooKeeper encryption](#broker-to-zookeeper-encryption)
     - [Encryption at rest](#encryption-at-rest)
   - [Authentication](#authentication)
     - [Mutual TLS (mTLS)](#mutual-tls-mtls)
     - [SASL (Simple Authentication and Security Layer)](#sasl-simple-authentication-and-security-layer)
+      - [SASL/GSSAPI (Kerberos)](#saslgssapi-kerberos)
       - [SASL/SCRAM](#saslscram)
+      - [Interbroker authentication](#interbroker-authentication)
+      - [External JAAS configuration](#external-jaas-configuration)
+      - [OAuth 2.0 bearer tokens](#oauth-20-bearer-tokens)
       - [Delegation tokens](#delegation-tokens)
+    - [ZooKeeper authentication](#zookeeper-authentication)
+    - [Configuring CLI tools and Kafdrop](#configuring-cli-tools-and-kafdrop)
   - [Authorization](#authorization)
     - [Enable authorization](#enable-authorization)
     - [Managing ACLs](#managing-acls)
+    - [World-readable topics and mixing allow/deny](#world-readable-topics-and-mixing-allowdeny)
     - [Prefixed resource patterns](#prefixed-resource-patterns)
+    - [Listing and bulk-removal](#listing-and-bulk-removal)
+    - [Network address restrictions](#network-address-restrictions)
+    - [Common authorization scenarios](#common-authorization-scenarios)
 - [Chapter 17: Quotas](#chapter-17-quotas)
   - [The rationale behind quotas](#the-rationale-behind-quotas)
     - [Mitigating denial of service attacks](#mitigating-denial-of-service-attacks)
@@ -230,6 +241,20 @@
   - [Simple stream processing example](#simple-stream-processing-example)
   - [Limitations](#limitations)
   - [Are transactions over-hyped?](#are-transactions-over-hyped)
+- [Appendix A: Modern Kafka Migration](#appendix-a-modern-kafka-migration)
+  - [A.1 KRaft: ZooKeeper Is Gone](#a1-kraft-zookeeper-is-gone)
+  - [A.2 Consumer Rebalance Protocol: KIP-848](#a2-consumer-rebalance-protocol-kip-848)
+  - [A.3 Share Groups (KIP-932)](#a3-share-groups-kip-932)
+  - [A.4 Streams Rebalance Protocol (KIP-1071)](#a4-streams-rebalance-protocol-kip-1071)
+  - [A.5 Kafka Streams Scala Library Deprecation](#a5-kafka-streams-scala-library-deprecation)
+  - [A.6 Tiered Storage](#a6-tiered-storage)
+  - [A.7 Java Version Requirements](#a7-java-version-requirements)
+  - [A.8 Dynamic KRaft Controllers (KIP-853)](#a8-dynamic-kraft-controllers-kip-853)
+  - [A.9 Eligible Leader Replicas (ELR)](#a9-eligible-leader-replicas-elr)
+  - [A.10 Broker Cordoning (KIP-1066)](#a10-broker-cordoning-kip-1066)
+  - [A.11 CLI Tool Changes](#a11-cli-tool-changes)
+  - [A.12 Config Deprecations and Removals](#a12-config-deprecations-and-removals)
+  - [A.13 Summary: Book-to-Modern Mapping](#a13-summary-book-to-modern-mapping)
 
 ---
 
@@ -324,7 +349,7 @@ Under this model, consistency within the originating domain is trivially maintai
 
 ### Applicability
 
-For all its outstanding benefits, EDA is not a panacea and cannot supplant integrated or monolithic systems in all cases. For instances, EDA is not well-suited to synchronous interactions, as mutual or unilateral awareness among collaborating parties runs contrary to the grain of EDA and negates most of its benefits.
+For all its outstanding benefits, EDA is not a panacea and cannot supplant integrated or monolithic systems in all cases. For instance, EDA is not well-suited to synchronous interactions, as mutual or unilateral awareness among collaborating parties runs contrary to the grain of EDA and negates most of its benefits.
 
 EDA is not a general-purpose architectural paradigm. It is designed to be used in conjunction with other paradigms and design patterns, such as synchronous request-response style messaging, to solve more general problems. In the areas where it can be applied, it ordinarily leads to significant improvements in the system’s non-functional characteristics. Therefore, one should seek to maximise opportunities for event-driven compositions, refactoring the architecture to that extent.
 
@@ -607,7 +632,7 @@ Precisely how records are partitioned is left to the discretion of the producer.
 
 While this partitioning scheme is deterministic, it is not consistent. Two records with the same key hashed at different points in time will correspond to an identical partition number if and only if the number of partitions has not changed in that time. Increasing the number of partitions in a topic (Kafka does not support non-destructive downsizing) results in the two records occupying potentially different partitions — leading to a breakdown of any prior order. There are many gotchas, such as this one, in Kafka; they will be called out as such from time to time.
 
-Records sharing the same hash are guaranteed to occupy the same partition. Assuming a topic with multiple partitions, records with a different key will likely end up in different partitions. However, due to hash collisions, records with different hashes may also end up in the same partition. Such is the nature of hashing; if the reader appreciates how a hash table works, this is no different. It was previously stated that records in the same partition may be causally related, but do not have to be. The reason is specifically to do with hashing; when there are more causally related record groupings than there are partitions in a topic, there will invariably be some partitions that contain multiple unrelated sets of records. In mathematics, this is referred to as the Dirichlet’s Drawer Principle or the Pigeonhole Principle. In fact, due to the imperfect space distribution of hash functions, unrelated records will likely be grouped in the same partition even there are more partitions than distinct keys.
+Records sharing the same hash are guaranteed to occupy the same partition. Assuming a topic with multiple partitions, records with a different key will likely end up in different partitions. However, due to hash collisions, records with different hashes may also end up in the same partition. Such is the nature of hashing; if the reader appreciates how a hash table works, this is no different. It was previously stated that records in the same partition may be causally related, but do not have to be. The reason is specifically to do with hashing; when there are more causally related record groupings than there are partitions in a topic, there will invariably be some partitions that contain multiple unrelated sets of records. In mathematics, this is referred to as the Dirichlet’s Drawer Principle or the Pigeonhole Principle. In fact, due to the imperfect space distribution of hash functions, unrelated records will likely be grouped in the same partition even if there are more partitions than distinct keys.
 
 Producers rarely care which specific partition the records will map to, only that related records end up in the same partition, and that their order is preserved. Similarly, consumers are largely indifferent to their assigned partitions, so long that they receive the records in the same order as they were published, where those records are causally bound.
 
@@ -794,7 +819,7 @@ The next useful bit of information is emitted by the socket listener:
 [2019-12-25 14:02:22,587] INFO Awaiting socket connections on 0.0.0.0:9092. (kafka.network.Acceptor)
 ```
 
-This tells us that Kafka is listening for inbound connections on port `9092`, and is bound to all network interfaces (indicated by the IP meta-address `0.0.0.0`).
+This tells us that Kafka is listening for inbound connections on port `9092`, and is bound to all network interfaces (indicated by the IP meta-address `0.0.0.0`). This is corroborated by the deprecated property `port`, which defaults to 9092. There is a much more sophisticated mechanism for configuring listeners, which we will examine in one of the following chapters. For now, a `0.0.0.0:9092` listener will suffice.
 
 Believe it or not, the most useful information one can get out of Kafka’s logs is actually the version number. Admittedly, it sounds somewhat banal, but how many times have you stared helplessly at the screen wondering why a piece of software that was just upgraded to the latest version still has the same bug that the authors have sworn they had fixed? Invariably, it is always some simple mistake — a symlink to the wrong binary, a typo in the path, a wrong value in an environment variable, or some other moth-eaten stuff-up along those lines. Printing the application version number in the logs is a simple way of eradicating these classes of errors.
 
@@ -830,7 +855,7 @@ Next on our list is Kafdrop. It’s a Java application with no dependencies, and
 
 As practical as a Docker image may be, we are going to ditch this option for now. Because we are running Kafka on localhost, Docker will struggle to connect to our broker, as Docker containers are normally unaware of processes running on the host machine. There is a way to change this but it is not portable across Linux and macOS, and will also require changes to the Kafka broker configuration — something we are not yet prepared to do. We will revisit Docker later. For now, we will go with the official Kafdrop binary distribution.
 
-Kafdrop binaries are hosted on Bintray, with a download link embedded in each release on GitHub. Open the releases page: [github.com/obsidiandynamics/kafdrop/releases](https://github.com/obsidiandynamics/kafdrop/releases) and pick the latest from the list.
+Kafdrop binaries are hosted on Bintray, with a download link embedded in each release on GitHub. Open the releases page: [github.com/obsidiandynamics/kafdrop/releases](https://github.com/obsidiandynamics/kafdrop/releases) and pick the latest from the list. Alternatively, you can navigate straight to the latest Kafdrop release by following this shortcut: [github.com/obsidiandynamics/kafdrop/releases/latest](https://github.com/obsidiandynamics/kafdrop/releases/latest).
 
 Clicking on the link will download a `.jar` file. Save it in a directory of your choice and run it as shown in the example below, replacing the filename as appropriate.
 
@@ -852,6 +877,8 @@ Switch back to the shell running Kafdrop. Looking over the standard output logs 
 
 ```text
 2019-12-25 19:08:49.465 INFO 82515 [main] k.s.BuildInfo: Kafdrop version: 3.18.0, build time: 2019-12-02T08:36:13.356Z
+...
+(some logs omitted)
 ...
 2019-12-25 19:08:50.752 INFO 82515 [main] o.s.b.w.e.u.UndertowServletWebServer: Undertow started on port(s) 9000 (http) with context path ''
 ```
@@ -1087,19 +1114,19 @@ Produces the following when no consumers are connected:
 ```text
 Consumer group 'cli-consumer' has no active members.
 
-GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-cli-consumer    getting-started 1          0               0               0
-cli-consumer    getting-started 0          2               2               0
-cli-consumer    getting-started 2          3               3               0
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
+cli-consumer    getting-started 1          0               0               0    -            -     -
+cli-consumer    getting-started 0          2               2               0    -            -     -
+cli-consumer    getting-started 2          3               3               0    -            -     -
 ```
 
 If, on the other hand, we attach a consumer — from an earlier example, using the `kafka-console-consumer.sh` tool — the output resembles the following:
 
 ```text
-GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-cli-consumer    getting-started 0          2               2               0
-cli-consumer    getting-started 1          0               0               0
-cli-consumer    getting-started 2          3               3               0
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID                                                           HOST           CLIENT-ID
+cli-consumer    getting-started 0          2               2               0    consumer-cli-consumer-1-077c1bf1-df64-4d3e-a479-350e962119cc  /127.0.0.1     consumer-cli-consumer-1
+cli-consumer    getting-started 1          0               0               0    consumer-cli-consumer-1-077c1bf1-df64-4d3e-a479-350e962119cc  /127.0.0.1     consumer-cli-consumer-1
+cli-consumer    getting-started 2          3               3               0    consumer-cli-consumer-1-077c1bf1-df64-4d3e-a479-350e962119cc  /127.0.0.1     consumer-cli-consumer-1
 ```
 
 In addition to describing a specific consumer group, this tool can be used to describe all groups:
@@ -1820,7 +1847,9 @@ By applying the pipeline pattern, we have decoupled two potentially slow operati
 
 ## Record filtering
 
-In rounding off this chapter, we shall highlight another compelling reason for an abstraction layer: the filtering of records. Filtering fulfills a natural question one might ask is: Why not filter at the business logic layer with some `if` statements? There are two challenges with this approach, which also become more difficult to solve as one moves up the application stack. Firstly, it assumes that the client has the requisite domain objects that can be mapped from a record’s serialized form. Secondly, it incurs the performance overhead of unconditionally unmarshalling all records, only to discard some records shortly thereafter.
+In rounding off this chapter, we shall highlight another compelling reason for an abstraction layer: the filtering of records. Filtering fulfills a set of use cases where either a deserializer, or an application-level unmarshaller might conditionally present a record to the rest of the application. This is not a native capability of a Kafka consumer, requiring a bespoke implementation.
+
+The natural question one might ask is: Why not filter at the business logic layer with some `if` statements? There are two challenges with this approach, which also become more difficult to solve as one moves up the application stack. Firstly, it assumes that the client has the requisite domain objects that can be mapped from a record’s serialized form. Secondly, it incurs the performance overhead of unconditionally unmarshalling all records, only to discard some records shortly thereafter.
 
 The first problem can be attributed to several causes: the source Kafka topic is broadly-versed, containing more types of records that the consumer legitimately requires; the record types might be known to the consumer, but it may have no interest in processing them; or the record structure has evolved over time, such that the topic may contain records that comply to varying schema versions.
 
@@ -1862,7 +1891,7 @@ In a simple networking topology, where each broker can be reached on a single ad
 
 At this point one would naturally assume that passing in `10.10.0.1:9092,10.10.0.2:9092,10.10.0.3:9092` for the bootstrap list should just work. The problem is that the Kafka broker does not know which IP address or hostname it should advertise, and it does a pretty bad job at auto-discovering this. In most cases, it will default to `localhost`.
 
-Upon bootstrapping, the client will connect to `10.10.0.1:9092`, being the first element in the bootstrap list. Having made the connection, the client will receive the cluster metadata — a list of three elements — each being `localhost:9092`. You can see where this is going. The client will then try connecting to `localhost` — to itself. Et voila, that is how the dreaded error is obtained: `Connection to node-1 (localhost/127.0.0.1:9092) could not be established.`
+Upon bootstrapping, the client will connect to `10.10.0.1:9092`, being the first element in the bootstrap list. Having made the connection, the client will receive the cluster metadata — a list of three elements — each being `localhost:9092`. You can see where this is going. The client will then try connecting to `localhost` — to itself. Et voila, that is how the dreaded error is obtained: `Connection to node -1 (localhost/127.0.0.1:9092) could not be established. Broker may not be available.`
 
 This is as much of a problem for simple single-broker Kafka installations as it is for multi-broker clusters. Clients will always follow addresses revealed by the cluster metadata even if there is only one node. This is solved with advertised listeners. Finally, we are getting around to the crux of the matter.
 
@@ -3254,6 +3283,8 @@ ssl.truststore.location=/path/to/server.truststore.jks
 ssl.truststore.password=secret
 ```
 
+Once configured, clients must specify `security.protocol=SSL` and supply the truststore to verify the broker. The `ssl.endpoint.identification.algorithm` property (default `https`) enables hostname verification against the certificate. Set it to an empty string to disable.
+
 ### Interbroker encryption
 
 To encrypt interbroker communications, simply change the interbroker listener to SSL:
@@ -3262,24 +3293,90 @@ To encrypt interbroker communications, simply change the interbroker listener to
 inter.broker.listener.name=SSL
 ```
 
+Once verified, the recommended next step is to disable the cleartext listener entirely, updating all brokers and clients in the interim to use SSL, then remove `PLAINTEXT` from `listeners` and `advertised.listeners`.
+
+### Broker-to-ZooKeeper encryption
+
+The current version of Kafka (2.4.0 at the time of writing) does not support encrypted broker-to-ZooKeeper traffic natively (KIP-513 targets release 2.5.0). For security-minded deployments, consider tunnelling the connection over a VPN or using a service mesh proxy capable of transparently initiating TLS connections.
+
 ### Encryption at rest
 
-Kafka does not have native facilities for enabling encrypted storage of record data. One must resort to full disk encryption, filesystem-level encryption, or end-to-end encryption (encrypting the payload on the producer and decrypting on the consumer).
+Kafka does not have native facilities for enabling encrypted storage of record data. One must resort to:
+
+- **Full disk encryption** — protects data when disks are detached from the host.
+- **Filesystem-level encryption** — similar protection at a finer granularity.
+- **End-to-end encryption** — encrypting the payload on the producer and decrypting on the consumer. This protects against embedded threats on the broker host.
+
+When using end-to-end encryption, the information entropy of record batches approaches unity, so compression should be disabled as it will only burn CPU cycles without decreasing payload size. Note that end-to-end encryption does not eliminate the need for TLS — SSL still protects metadata, record headers, offsets, group membership, and guards against man-in-the-middle attacks.
 
 ## Authentication
 
+Kafka supports several modes for attesting the identity of connected clients.
+
 ### Mutual TLS (mTLS)
 
-Mutual TLS utilizes the same principle of certificate signing used by conventional TLS, but in the opposite direction. The client presents a certificate that is verified by the broker.
-To enable client authentication on the broker, set `ssl.client.auth=required` in `server.properties`.
+Mutual TLS (also known as client-side X.509 authentication or two-way SSL/TLS) utilises the same principle of certificate signing as conventional TLS, but in the opposite direction. Each client has a dedicated certificate signed by a trusted CA.
+
+To enable client authentication, set `ssl.client.auth` in `server.properties`:
+
+- **`none`** (default): Client authentication is disabled.
+- **`requested`**: Client may optionally authenticate; a "halfway house" for gradual migration.
+- **`required`**: The broker mandates client-side authentication; connections without a valid certificate are rejected.
+
+Full worked example for enabling mTLS:
+
+```bash
+# Generate a private key for the client
+keytool -keystore client.keystore.jks -alias localhost -validity 365 -genkey -keyalg RSA
+
+# Sign the client certificate
+keytool -keystore client.keystore.jks -alias localhost -certreq -file client-cert-req
+openssl x509 -req -CA ca-cert -CAkey ca-key -in client-cert-req -out client-cert-signed -days 365 -CAcreateserial
+
+# Import CA and signed certificate into client keystore
+keytool -keystore client.keystore.jks -alias CARoot -import -file ca-cert
+keytool -keystore client.keystore.jks -alias localhost -import -file client-cert-signed
+```
+
+Configure the broker:
+
+```properties
+ssl.client.auth=required
+```
+
+On the client side, add the keystore configuration:
+
+```java
+config.put(SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG, "client.keystore.jks");
+config.put(SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG, "secret");
+config.put(SslConfigs.SSL_KEY_PASSWORD_CONFIG, "secret");
+```
+
+The user principal is taken from the CN attribute of the certificate. This can be customised via `ssl.principal.mapping.rules` in the format `RULE:pattern/replacement/[LU]`.
+
+**Important limitations of mTLS:**
+
+- **Impersonation risk:** If the signing process is not tightly controlled, one client could request a certificate with another client's CN, impersonating it. The relationship between client and CA must be individually authenticated.
+- **No certificate revocation:** This has been an open issue since May 2016. If a private key is compromised, the only workaround is to remove privileges from the affected principal and rotate usernames — or redeploy a new CA and re-sign all legitimate certificates. When using mTLS across multiple clusters, segregate trust chains so each cluster trusts only its own intermediate CA.
+- **Incompatibility with application-level auth:** Despite operating at different OSI layers, two-way SSL cannot be used in conjunction with SASL authentication — it is either one or the other.
 
 ### SASL (Simple Authentication and Security Layer)
 
-Kafka supports SASL for embedding authentication in application protocols.
+Kafka supports SASL — an extensible framework for embedding authentication in application protocols, decoupling authentication concerns from application protocols. SASL is rarely used on its own; the most common deployment model pairs it with TLS.
+
+#### SASL/GSSAPI (Kerberos)
+
+Kafka supports GSSAPI, commonly associated with Kerberos (its dominant implementation). Kerberos and Active Directory work best for interactive users in a corporate setting, but Kafka clients are rarely individuals — they are applications using service accounts. Centralised authentication for service accounts is challenging because backend applications consume numerous disparate resources (Kafka, Postgres, Redis, third-party APIs), not all of which support Kerberos. The prevalent industry trend is migration away from centralised directories towards **centralised secrets management systems** — managing credentials rather than principals.
+
+This chapter does not provide a full Kerberos worked example due to its complexity; it is adequately documented at kafka.apache.org/documentation.
 
 #### SASL/SCRAM
 
-SCRAM (Salted Challenge Response Authentication Mechanism) fulfills authentication without the explicit transfer of credentials.
+SCRAM (Salted Challenge Response Authentication Mechanism) fulfills authentication without the explicit transfer of credentials. It is a protocol designed to authenticate without sending the password over the wire.
+
+SCRAM is bidirectional: not only must the client prove to the broker that it has the password, but the broker must also prove that it knew the password at some point in time. This is asymmetric — the client proves **present knowledge**, while the broker proves **past knowledge**. This relieves the broker from persisting the password verbatim; instead, it stores irreversible derivations (salts and hashes).
+
+Kafka supports **SCRAM-SHA-256** and **SCRAM-SHA-512**. Both are very strong; SHA-512 offers better collision resistance and is optimised for 64-bit processors, while SHA-256 is more performant on 32-bit. SHA-256 remains the more common choice.
 
 **1. Configure the broker:**
 
@@ -3298,23 +3395,122 @@ kafka-configs.sh --zookeeper localhost:2181 --alter \
   --entity-type users --entity-name alice
 ```
 
+Credentials are stored as salted, hashed derivations — the original password cannot be recovered from ZooKeeper. To list or delete credentials, use `--describe` or `--delete-config`.
+
 **3. Configure the client:**
 
 ```java
 String saslJaasConfig = "org.apache.kafka.common.security.scram.ScramLoginModule required\n" +
                         "username=\"alice\"\n" +
                         "password=\"alice-secret\";";
+config.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_SSL");
 config.put(SaslConfigs.SASL_MECHANISM, "SCRAM-SHA-512");
 config.put(SaslConfigs.SASL_JAAS_CONFIG, saslJaasConfig);
 ```
 
+**SASL/PLAIN** is similar but sends credentials in cleartext and does not use ZooKeeper for credential storage — credentials are defined directly in the JAAS configuration. Guided by Defence in Depth, SCRAM should be preferred over PLAIN. Note that SASL authentication is **incompatible with SSL client authentication** — when connecting over the `SASL_SSL` listener, `ssl.client.auth` settings are ignored.
+
+#### Interbroker authentication
+
+To upgrade interbroker communications to use authentication, create admin credentials and update `server.properties`:
+
+```properties
+inter.broker.listener.name=SASL_SSL
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=\
+  org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="admin" password="admin-secret";
+```
+
+Harden the file permissions with `chmod 600 $KAFKA_HOME/config/server.properties`.
+
+#### External JAAS configuration
+
+Where in-line JAAS config is not supported, create a `kafka_server_jaas.conf` file:
+
+```properties
+sasl_ssl.KafkaServer {
+  org.apache.kafka.common.security.scram.ScramLoginModule required
+  username="admin" password="admin-secret";
+};
+```
+
+Then start the broker with:
+
+```bash
+KAFKA_OPTS=-Djava.security.auth.login.config=$KAFKA_HOME/config/kafka_server_jaas.conf
+$KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties
+```
+
+#### OAuth 2.0 bearer tokens
+
+The OAUTHBEARER SASL mechanism enables the use of OAuth 2.0 Access Tokens to authenticate user principals. Unsecured JWS tokens (with `"alg":"none"`) function out-of-the-box with minimal configuration — the principal's username is taken from the `sub` claim in the JWT. For production, implement `AuthenticateCallbackHandler` on both the client (to generate signed tokens) and the broker (to validate them). The open-source Kafka OAuth project at github.com/jairsjunior/kafka-oauth provides a ready implementation.
+
 #### Delegation tokens
 
-Delegation tokens are used as a lightweight authentication mechanism complementary to SASL, primarily to simplify the logistics of key distribution for ephemeral worker nodes in stream processing.
+Delegation tokens are a lightweight authentication mechanism complementary to SASL, introduced in KIP-48 (release 1.1.0). They simplify key distribution for ephemeral worker nodes in stream processing — the coordinator creates a time-bounded token and hands it to each worker, so long-lived credentials never leave the coordinator.
+
+**Key concepts:**
+
+- **Lifespan:** Hard upper bound on token age (`delegation.token.max.lifetime.ms`, default 7 days).
+- **Expiry:** Soft limit for token use (`delegation.token.expiry.time.ms`, default 24 hours).
+- **Renewal:** Extends the expiry time, subject to the lifespan limit.
+- **Purging:** Expired tokens are asynchronously purged from ZooKeeper.
+
+**Enable delegation tokens on the broker:**
+
+```properties
+delegation.token.master.key=secret-master-key
+delegation.token.expiry.time.ms=3600000
+delegation.token.max.lifetime.ms=7200000
+```
+
+The `delegation.token.master.key` is required and must be shared by all brokers.
+
+**Creating tokens:**
+
+```bash
+kafka-delegation-tokens.sh --bootstrap-server localhost:9094 \
+  --command-config client.properties --create --max-life-time-period -1 \
+  --renewer-principal User:admin
+```
+
+**Client configuration:** The username is set to the token ID, password to the HMAC value, and `tokenauth="true"` must be present to distinguish token auth from username/password auth.
+
+**Rotating secrets** is currently a three-step process: (1) expire all existing tokens, (2) roll the cluster with a new master key, (3) generate and distribute new tokens.
+
+### ZooKeeper authentication
+
+ZooKeeper supports SASL client authentication using DIGEST-MD5. ZooKeeper authentication powers its authorization model via ACLs on znodes (CREATE, READ, WRITE, DELETE, ADMIN permissions). ZooKeeper 3.5.6 does not enforce authentication — only authorization — meaning unauthenticated connections are accepted but restricted.
+
+To enable ZooKeeper authentication, create `zookeeper_jaas.conf` and `kafka_server_jaas.conf` with the appropriate `DigestLoginModule` configuration, then run `zookeeper-security-migration.sh --zookeeper.acl secure` to migrate existing znodes. Configure the broker with `zookeeper.set.acl=true`. CLI tools also require the JAAS file via `KAFKA_OPTS`.
+
+### Configuring CLI tools and Kafdrop
+
+Once Kafka is secured, CLI tools must be configured with `client.properties` containing `security.protocol=SASL_SSL`, the truststore location, and SASL credentials. Supply the file via the `--command-config` flag.
+
+For Kafdrop, copy the truststore as `kafka.truststore.jks` and create a `kafka.properties` file with the security configuration. Start Kafdrop connecting to the SASL_SSL port.
 
 ## Authorization
 
-Kafka implements authorization by way of resource-centric Access Control Lists (ACLs). An ACL specifies a Principal, Operation, Host, Resource type, Resource pattern, and Outcome (Allow/Deny).
+With SSL and authentication in place, authorization provides fine-grained control over what authenticated clients are allowed to do. Kafka implements authorization via resource-centric Access Control Lists (ACLs).
+
+An ACL specifies:
+
+- **Principal** — the user performing the operation
+- **Operation** — the action (Read, Write, Create, Delete, Alter, Describe, ClusterAction, DescribeConfigs, AlterConfigs, IdempotentWrite, All)
+- **Host** — optional network address restriction
+- **Resource type** — Cluster, DelegationToken, Group, Topic, or TransactionalId
+- **Resource pattern** — literal or prefixed matching
+- **Outcome** — Allow or Deny
+
+Resource types and their supported operations:
+
+- **Cluster:** Alter, AlterConfigs, ClusterAction, Create, Describe, DescribeConfigs
+- **DelegationToken:** Describe
+- **Group:** Delete, Describe, Read
+- **Topic:** Alter, AlterConfigs, Create, Delete, Describe, DescribeConfigs, Read, Write
+- **TransactionalId:** Describe, Write
 
 ### Enable authorization
 
@@ -3322,6 +3518,8 @@ Kafka implements authorization by way of resource-centric Access Control Lists (
 authorizer.class.name=kafka.security.auth.SimpleAclAuthorizer
 super.users=User:admin
 ```
+
+Kafka takes a **default-deny** (positive/additive) stance — unless an action is explicitly allowed, it is denied. This can be inverted with `allow.everyone.if.no.acl.found=true`, but the default-deny model is recommended as it starts from a blank slate and adds permissions on a needs basis.
 
 ### Managing ACLs
 
@@ -3335,11 +3533,37 @@ kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properti
 kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
   --add --allow-principal User:alice \
   --operation IdempotentWrite --cluster
+
+# Grant Read on a consumer group
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --add --allow-principal User:alice \
+  --operation Read --group basic-consumer-sample
 ```
+
+### World-readable topics and mixing allow/deny
+
+To make a topic readable by all authenticated users without listing them individually, use the wildcard `User:"*"`:
+
+```bash
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --add --allow-principal User:"*" --operation Read --topic guest-readable
+```
+
+To exclude a specific user from a topic (e.g., guests from `trusted-only`), combine allow and deny:
+
+```bash
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --add --allow-principal User:"*" --operation Read --topic trusted-only
+
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --add --deny-principal User:guest --operation Read --topic trusted-only
+```
+
+Deny rules take precedence over allow rules. Always use an allow rule over a broader-matching pattern than a deny rule. This gives up to three rule tiers: default-deny (outermost), custom allow, custom deny (innermost).
 
 ### Prefixed resource patterns
 
-Kafka supports prefixed ACLs, allowing you to grant permissions to multiple resources sharing a common prefix:
+Introduced in KIP-290 (release 2.0.0), prefixed ACLs allow matching multiple resources sharing a common prefix:
 
 ```bash
 kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
@@ -3347,6 +3571,36 @@ kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properti
   --resource-pattern-type=prefixed \
   --operation Read --topic trusted
 ```
+
+### Listing and bulk-removal
+
+```bash
+# List all ACLs
+kafka-acls.sh --command-config client.properties --bootstrap-server localhost:9094 --list
+
+# View all rules affecting a specific resource (including prefixed matches)
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --list --resource-pattern-type=match --topic trusted-only
+
+# Bulk remove matching rules
+kafka-acls.sh --bootstrap-server localhost:9094 --command-config client.properties \
+  --remove --resource-pattern-type=match --topic trusted-only --force
+```
+
+### Network address restrictions
+
+Kafka supports restricting ACLs to specific IP addresses using `--allow-host` or `--deny-host` flags. Multiple flags may be specified in a single command.
+
+### Common authorization scenarios
+
+| Scenario             | Required ACLs                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| Create/delete topics | `ClusterAction` on Cluster                                                                  |
+| Publish to a topic   | `Write` (+ `IdempotentWrite` on Cluster if idempotence enabled) and `Describe` on the topic |
+| Consume from a topic | `Read` and `Describe` on the topic + `Read` on the consumer group                           |
+| Use the admin client | `DescribeConfigs`/`AlterConfigs` on the appropriate resource types                          |
+
+Always use separate credentials for different application entities and grant only the minimal privileges required. Avoid using admin users for routine operations. The recommended approach is to test ACLs against a staging cluster before applying them to production.
 
 ---
 
@@ -3411,9 +3665,15 @@ $$Y = \frac{T}{D + T}$$
 
 ### Request rate quotas
 
-Request rate quotas were introduced to prevent denial of service from frequent protocol activity and address scenarios where clients utilise the broker’s CPU disproportionately to the request/response size (e.g., mismatched compression settings, TLS overhead, unauthorised requests).
+Request rate quotas were introduced in KIP-124 (release 0.11.0.0) to prevent denial of service from frequent protocol activity and address scenarios where clients utilise the broker’s CPU disproportionately to the request/response size (e.g., mismatched compression settings, TLS overhead, unauthorised requests).
 
-Request quotas are configured as a fraction of overall time a client is allowed to occupy request handler (I/O) threads and network threads within each quota window. For example, a quota of 50% implies that half of a thread can be utilised on average within the measured time window. The underlying mechanism for enforcing request rate quotas is virtually identical to the one used for network bandwidth quotas, piggybacking on the same sliding window properties.
+Request quotas are configured as a fraction of overall time a client is allowed to occupy request handler (I/O) threads and network threads within each quota window. For example, a quota of 50% implies that half of a thread can be utilised on average within the measured time window. A quota of 200% is the equivalent of two full-time threads. The underlying mechanism for enforcing request rate quotas is virtually identical to the one used for network bandwidth quotas, piggybacking on the same sliding window properties. Unlike network quotas, request rate quotas are dilation-resistant for vertical scaling only — they are based on the absolute values of `num.io.threads` and `num.network.threads`.
+
+**Worked example:** With default window settings ($T = 11$ s), consider three clients with a 20,000 B/s quota:
+
+- Client C0 publishes at 14 kB/s — no penalty (under quota).
+- Client C1 publishes at 36 kB/s — $D = 11 \times (36000 - 20000) / 20000 = 8.8$ s delay.
+- Client C2 publishes at 100 kB/s — $D = 11 \times (100000 - 20000) / 20000 = 44$ s delay, yielding a duty cycle of only 20%.
 
 ## Subject affinity and precedence order
 
@@ -3466,7 +3726,7 @@ This chapter looks at one last control made available by Kafka — transactions.
 
 ## Preamble
 
-Transactions arrived in release 0.11.0.0, as part of a much larger KIP-98. The significance of this may not be immediately apparent, but the reader has already witnessed this KIP in action in Chapter 10: Client Configuration — namely, the `enable.idempotence` property. Both the idempotent producer and transactional messaging features are highly related and share a great deal in common.
+Transactions arrived in release 0.11.0.0, as part of a much larger KIP-98 — an undertaking of approximately 60 work items with over three years of planning, a nine-month public review, and 15,000+ lines of unit tests. The significance of this may not be immediately apparent, but the reader has already witnessed this KIP in action in Chapter 10: Client Configuration — namely, the `enable.idempotence` property. Both the idempotent producer and transactional messaging features are highly related and share a great deal in common. The performance overhead of transactions is estimated at 3–5%.
 
 ## The rationale behind transactions
 
@@ -3474,7 +3734,13 @@ Transactions arrived in release 0.11.0.0, as part of a much larger KIP-98. The s
 
 Under a conventional consume-transform-produce model, the consumer side of a stage will read a record from the input topic, apply a transformation, and publish a corresponding record on the output topic. Once it receives an acknowledgement, it will commit the offsets of the input record.
 
-If the process fails _after_ publishing the output record but _before_ committing the input offsets, the recovering process will replay the input record, resulting in two output records for the same input record. This is the essence of **at-least-once** delivery.
+There are five failure cases to consider in this model:
+
+1. **Failure before consumption:** No effect — the input record will be redelivered.
+2. **Failure after consumption but before transformation:** The consumer recovers from the last committed offset and processes the record again.
+3. **Failure after transformation but before publishing:** The output record is lost; recovery replays the input record.
+4. **Failure _after_ publishing the output record but _before_ committing the input offsets** — the core problem. The recovering process will replay the input record, resulting in two output records for the same input record. This is the essence of **at-least-once** delivery.
+5. **Failure after committing offsets:** No duplication, but the output record may have been processed.
 
 Without a secondary index, Kafka cannot natively deduplicate records based on application-level IDs. What if Kafka was used as primary storage — the proverbial ‘source of truth’; for example, acting in the role of an event store in an event sourcing system? It would hardly be acceptable to have two records representing the same logical event.
 
@@ -3490,33 +3756,41 @@ The transactional messaging capability strengthens Kafka’s delivery semantics 
 
 ### Role of the transaction coordinator
 
-At the heart of the implementation is a unique **Producer ID (PID)** that is assigned by a **transaction coordinator** for the duration of the producer’s session. Transactional messaging builds upon this infrastructure by increasing the lifetime of a producer’s PID such that it survives a single producer session. This is achieved by specifying an optional `transactional.id` property on the producer.
+At the heart of the implementation is a unique **Producer ID (PID)** that is assigned by a **transaction coordinator** — a module within a broker — for the duration of the producer’s session. The coordinator is load-balanced via the internal `__transaction_state` topic in a manner similar to consumer groups. Transactional messaging builds upon this infrastructure by increasing the lifetime of a producer’s PID such that it survives a single producer session. This is achieved by specifying an optional `transactional.id` property on the producer (default expiration: one week, controlled by `transactional.id.expiration.ms`).
 
 The epoch acts as a fencing mechanism, blocking **zombie** processes that have been displaced by a newer PID assignment. A `ProducerFencedException` is thrown when the producer attempts to manipulate a transaction that has been fenced off.
 
 ### Producer API enhancements
 
-Transactional messaging adds several methods to the Producer API:
+Transactional messaging adds several methods to the Producer API, operating through a state machine with states: `READY`, `IN_TRANSACTION`, `COMMITTING_TRANSACTION`, `ABORTING_TRANSACTION`:
 
-- `initTransactions()`: Initialises the transactional subsystem and fences zombies.
-- `beginTransaction()`: Demarcates the start of a transaction scope.
+- `initTransactions()`: Initialises the transactional subsystem and fences zombies (assigns a PID with epoch).
+- `beginTransaction()`: Demarcates the start of a transaction scope (transitions to `IN_TRANSACTION`).
 - `sendOffsetsToTransaction()`: Incorporates consumer-side offsets into the scope of the current transaction.
-- `commitTransaction()`: Flushes unsent records and commits the transaction.
-- `abortTransaction()`: Discards pending records and aborts the transaction.
+- `commitTransaction()`: Flushes unsent records and commits the transaction (transitions through `COMMITTING_TRANSACTION` back to `READY`).
+- `abortTransaction()`: Discards pending records and aborts the transaction (transitions through `ABORTING_TRANSACTION` back to `READY`).
+
+On the consumer side, consumers must piggyback on the producer to commit offsets atomically — `commitSync()` / `commitAsync()` cannot be used, as they operate outside the transaction scope.
 
 ### Assigning a transactional ID
 
-The most perplexing aspect of transaction management is the choice of the transactional ID. It must survive producer sessions and act as a fencing mechanism.
+The most perplexing aspect of transaction management is the choice of the transactional ID. It must survive producer sessions and act as a fencing mechanism. Several alternatives exist:
 
-The recommended approach is to replace the singleton producer with a collection of producers — **one for each assigned partition in the input set**. The transactional ID for each producer instance is derived by concatenating the corresponding input topic and partition index pair (e.g., `tx-input-2`).
+- **Shared transactional ID:** If all consumers use the same ID, a fencing collision prevents any from making progress.
+- **Random UUID:** No fencing capability — a zombie process cannot be distinguished.
+- **The recommended approach** is to replace the singleton producer with a collection of producers — **one for each assigned partition in the input set**. The transactional ID for each producer instance is derived by concatenating the corresponding input topic and partition index pair (e.g., `tx-input-2`).
 
-By pinning a producer client instance to the input topic-partition, we capture the causality among input and output records within the identity of the producer. As the partition assignment changes on the group coordinator, the causal relationship is carried forward to the new assignee; the outgoing assignee will fail if it attempts to publish a record under the same identity.
+By pinning a producer client instance to the input topic-partition, we capture the causality among input and output records within the identity of the producer. As the partition assignment changes on the group coordinator, the causal relationship is carried forward to the new assignee; the outgoing assignee will fail if it attempts to publish a record under the same identity. The producers may be lazily initialised within a `ConsumerRebalanceListener`.
 
 ### Transactional consumers
 
 To enable transactional semantics on a consumer, the `isolation.level` must be set to `read_committed`. Within this mode, the consumer replaces its notion of end offsets with the **Last Stable Offset (LSO)** — the minimum of the high-water mark and the smallest offset of any open transaction. Under the constraint of the LSO, a consumer will not be allowed to enter a region in the log that contains an open transaction until that transaction commits or aborts.
 
+When a transaction aborts, Kafka does not delete records from the affected partitions — being an append-only ledger. Instead, an **abort marker** is written, and `read_committed` consumers skip over the aborted records transparently.
+
 ## Simple stream processing example
+
+The following example demonstrates the consume-transform-produce loop with pinned producers:
 
 ```java
 // Pinned Producers mapping
@@ -3538,15 +3812,277 @@ try {
 }
 ```
 
+The complete source code for a working example — including `PinnedProducers`, `TransformStage`, `InputStage`, and `OutputStage` — is available at github.com/ekoutanov/effectivekafka.
+
 ## Limitations
 
 1. **Bound to Kafka resources:** Kafka does not support standard transaction APIs such as XA or JTA.
 2. **Cannot span producers:** Transactions cannot be used to span multiple producer instances with different transactional IDs.
 3. **Cannot span clusters:** Consumer-side offsets cannot be committed via a transaction coordinator residing in a different cluster.
-4. **Incomplete exactly-once semantics:** Transactions do nothing to prevent an input record from being handled twice if the processing stage has non-idempotent side effects (e.g., writing to an external database). The application must still ensure idempotence for external resources.
+4. **May be partially observed:** A consumer using `read_committed` may still partially observe a transaction across multiple partitions where some partitions have committed and others have not. Log segment deletion and compaction may also remove uncommitted transaction markers.
+5. **Incomplete exactly-once semantics:** Transactions do nothing to prevent an input record from being handled twice if the processing stage has non-idempotent side effects (e.g., writing to an external database). The application must still ensure idempotence for external resources.
 
 ## Are transactions over-hyped?
 
 For the majority of event-driven applications, the most useful and practical aspect of transactional messaging is the **idempotence guarantee on the producer** (`enable.idempotence=true`). This feature utilises the same underlying PID concept, ensuring that records do not arrive out-of-order or in duplicate on the broker within the delivery timeout, without the complexity of managing pinned transactional producers.
 
-It should be acknowledged that the exactly-once impossibility dictum does not take anything away from Kafka; the release of transactional messaging is nonetheless useful in a limited sense. Where the application domain does not fit entirely into the limiting case for which transactional messaging holds, the reader ought to take their own measures in ensuring idempotence across all affected resources.
+**Kafka Streams** can transparently deal with transactions — it handles the mapping of pinned producers and the consumption of transactional data internally. For applications built on Kafka Streams, exactly-once semantics are available with minimal additional complexity.
+
+It should be acknowledged that the exactly-once impossibility dictum does not take anything away from Kafka; the release of transactional messaging is nonetheless useful in a limited sense. There is no silver bullet — exactly-once semantics are not possible at the middleware layer without tight-knit collaboration with the application. Where the application domain does not fit entirely into the limiting case for which transactional messaging holds, the reader ought to take their own measures in ensuring idempotence across all affected resources.
+
+---
+
+# Appendix A: Modern Kafka Migration
+
+> This appendix bridges the gap between the book's original coverage (Kafka 2.4, ZooKeeper-based) and modern Apache Kafka 4.3.x (KRaft-only, with new protocols and features). Consult the `docs/` folder in this repository for the complete official documentation.
+
+---
+
+## A.1 KRaft: ZooKeeper Is Gone
+
+The book's architecture chapter (Ch3) describes ZooKeeper as a core component for controller election and metadata storage. **As of Apache Kafka 4.0+, ZooKeeper mode has been completely removed.**
+
+**What changed:**
+
+| Aspect              | Book Era (Kafka 2.4)               | Modern Kafka (4.3.x)                                                                |
+| ------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
+| Controller election | ZooKeeper ephemeral node           | Raft quorum among controller nodes                                                  |
+| Metadata storage    | ZooKeeper                          | Internal `__cluster_metadata` log replicated via Raft                               |
+| Cluster membership  | ZooKeeper `/brokers/ids` path      | Controller quorum with heartbeat-based session tracking                             |
+| Required servers    | Kafka brokers + ZooKeeper ensemble | Only Kafka servers (controllers + brokers)                                          |
+| `server.properties` | `zookeeper.connect=` required      | No ZooKeeper config; uses `process.roles` and `controller.quorum.bootstrap.servers` |
+
+**Key configuration changes:**
+
+```properties
+# Book era (Kafka 2.4) — ZooKeeper
+zookeeper.connect=localhost:2181
+broker.id=0
+
+# Modern Kafka (4.3+) — KRaft
+process.roles=broker,controller          # or just 'broker' / 'controller'
+node.id=0
+controller.quorum.bootstrap.servers=localhost:9093
+controller.listener.names=CONTROLLER
+listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+```
+
+**Startup sequence:**
+
+```bash
+# Book era
+zookeeper-server-start.sh config/zookeeper.properties
+kafka-server-start.sh config/server.properties
+
+# Modern Kafka (4.3+)
+KAFKA_CLUSTER_ID="$(kafka-storage.sh random-uuid)"
+kafka-storage.sh format -t $KAFKA_CLUSTER_ID -c config/server.properties
+kafka-server-start.sh config/server.properties
+```
+
+**Controller provisioning (Kafka 4.3+):**
+
+- **Standalone:** `kafka-storage.sh format --standalone -t $CLUSTER_ID -c config/controller.properties`
+- **Multiple controllers:** Use `--initial-controllers "0@host:port:uuid,..."` flag
+- **Adding controllers dynamically** (Kafka 4.1+): Use `kafka-metadata-quorum.sh add-controller`
+- **Recommended:** 3 or 5 dedicated controllers for production; combined mode (`process.roles=broker,controller`) for dev/test
+
+---
+
+## A.2 Consumer Rebalance Protocol: KIP-848
+
+The book's Chapter 15 describes consumer rebalancing with eager and cooperative (incremental) strategies using client-side assignors. **Since Apache Kafka 4.0, a new Consumer rebalance protocol (KIP-848) is GA.**
+
+**What changed:**
+
+| Aspect            | Classic Protocol                              | Consumer Protocol (KIP-848)                             |
+| ----------------- | --------------------------------------------- | ------------------------------------------------------- |
+| Assignor location | Client-side (`partition.assignment.strategy`) | Server-side (`group.consumer.assignors`)                |
+| Heartbeat control | Client configs (`heartbeat.interval.ms`)      | Server configs (`group.consumer.heartbeat.interval.ms`) |
+| Session timeout   | Client config (`session.timeout.ms`)          | Server config (`group.consumer.session.timeout.ms`)     |
+| Rebalance design  | Global sync barrier                           | Fully incremental, no barrier                           |
+| Default assignor  | `RangeAssignor` (client)                      | `uniform` (server)                                      |
+
+**To enable the new protocol:**
+
+```properties
+# Consumer client config
+group.protocol=consumer
+```
+
+**When the new protocol is enabled, these configs are no longer usable:**
+
+- `heartbeat.interval.ms`
+- `session.timeout.ms`
+- `partition.assignment.strategy`
+- `enforceRebalance()` / `enforceRebalance(String)`
+
+**Migration path:** Consumer groups automatically convert from Classic to Consumer and vice versa when empty. For online migration, roll out consumers with `group.protocol=consumer` — the first new-protocol consumer joining triggers conversion. Downgrade reverses when the last new-protocol consumer leaves.
+
+**Evolution timeline (KIP-1274):**
+
+| Version   | Status                                                 |
+| --------- | ------------------------------------------------------ |
+| Kafka 3.7 | Early Access                                           |
+| Kafka 4.0 | GA (production-ready)                                  |
+| Kafka 5.0 | Defaults to Consumer protocol; Classic still supported |
+| Kafka 6.0 | Only Consumer protocol supported                       |
+
+---
+
+## A.3 Share Groups (KIP-932)
+
+The book does not cover share groups, as they were introduced after publication. **Since Apache Kafka 4.2, share groups are GA.**
+
+Share groups are an alternative to consumer groups where multiple consumers can cooperatively consume records from the same partition. Key differences from consumer groups:
+
+| Aspect                 | Consumer Group                | Share Group                                                            |
+| ---------------------- | ----------------------------- | ---------------------------------------------------------------------- |
+| Partition assignment   | Each partition → one consumer | Multiple consumers can read same partition                             |
+| Max consumers          | Cannot exceed partition count | Can exceed partition count                                             |
+| Record acknowledgement | Offset-based (batch commit)   | Per-record acknowledgement                                             |
+| Delivery tracking      | Not tracked                   | Delivery attempts counted; automatic handling of unprocessable records |
+| Ordering               | Total order per partition     | No ordering guarantee                                                  |
+
+**When to use share groups:** Queue-like workloads where records are processed one at a time, rather than as part of an ordered stream.
+
+**Configuration:**
+
+```properties
+# Share consumer
+group.id=my-share-group
+# No group.protocol needed — share groups use their own protocol
+```
+
+**Server-side configs (Kafka 4.3):**
+
+- `share.delivery.count.limit` — max delivery attempts
+- `share.partition.max.record.locks` — max acquired records per partition
+- `share.record.lock.duration.ms` — acquisition lock duration (default: 30s)
+- `share.renew.acknowledge.enable` — enable renewal acknowledgements
+
+---
+
+## A.4 Streams Rebalance Protocol (KIP-1071)
+
+The book's Kafka Streams coverage assumes the classic consumer group rebalance protocol. **Since Kafka 4.2, the Streams Rebalance Protocol is production-ready** for its core feature set. This broker-driven rebalancing system provides faster, more stable rebalances and better observability for Kafka Streams applications.
+
+---
+
+## A.5 Kafka Streams Scala Library Deprecation
+
+**As of Kafka 4.3**, the `kafka-streams-scala` library is deprecated and will be removed in Kafka 5.0. Migrate to the Java Kafka Streams API or use the Scala migration guide in the official documentation.
+
+---
+
+## A.6 Tiered Storage
+
+The book briefly mentions tiered storage as a "newer feature." **As of Kafka 4.x, tiered storage is GA** and has several new configuration options:
+
+| Config (Kafka 4.3)                         | Purpose                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------ |
+| `remote.log.metadata.topic.min.isr`        | Min ISR for internal `__remote_log_metadata` topic (default: 2)    |
+| `follower.fetch.last.tiered.offset.enable` | New followers bootstrap from last tiered offset (default: `false`) |
+| `remote.log.metadata.admin.<property>`     | Prefix for admin client config used by `RemoteLogMetadataManager`  |
+
+> **Deprecated:** `remote.log.manager.thread.pool.size` — use `remote.log.manager.follower.thread.pool.size` instead.
+
+**Tiered storage considerations:**
+
+- Requires a single mount point (does not support JBOD)
+- When using end-to-end encryption, compression should be disabled (entropy already maximal)
+- The `EARLIEST_PENDING_UPLOAD_TIMESTAMP` (-6) timestamp type was added to `ListOffsets` API (version 11)
+
+---
+
+## A.7 Java Version Requirements
+
+The book assumes Java 8/11. **Modern Kafka 4.x requirements:**
+
+| Module                | Minimum Java | Supported Versions   |
+| --------------------- | ------------ | -------------------- |
+| Brokers & Controllers | 17           | 17, 21, 25           |
+| Clients & Streams     | 11           | 11, 17, 21, 25       |
+| Java 8                | —            | Removed in Kafka 4.0 |
+
+---
+
+## A.8 Dynamic KRaft Controllers (KIP-853)
+
+**Kafka 4.1+** supports dynamic controller quorums, allowing controllers to be added or removed at runtime without restarting the cluster:
+
+```bash
+# Add a controller
+kafka-metadata-quorum.sh --bootstrap-server localhost:9092 add-controller \
+  --command-config controller.properties
+
+# Remove a controller
+kafka-metadata-quorum.sh --bootstrap-server localhost:9092 remove-controller \
+  --controller-id <id> --controller-directory-id <directory-id>
+```
+
+Static quorum (using `controller.quorum.voters`) is still supported but deprecated in favour of dynamic quorum (using `controller.quorum.bootstrap.servers`). Check your quorum type with `kafka-features.sh describe` — if `kraft.version` is level 0, you're using a static quorum; level 1+ means dynamic.
+
+---
+
+## A.9 Eligible Leader Replicas (ELR)
+
+**Kafka 4.x** introduces Eligible Leader Replicas (ELR), which allow a broader set of replicas to be eligible for leader election, improving availability during extended outages. When ELR is enabled, the semantics of `min.insync.replicas` change — ensure you review the [ELR documentation](https://kafka.apache.org/43/documentation.html#eligible_leader_replicas) before enabling in production.
+
+---
+
+## A.10 Broker Cordoning (KIP-1066)
+
+**Kafka 4.3** introduces the `cordoned.log.dirs` broker config for safe broker decommissioning. Mark directories as off-limits for new partition placement, let partitions migrate away via Cruise Control or manual reassignment, then remove the broker.
+
+---
+
+## A.11 CLI Tool Changes
+
+The book's CLI examples use several tools with changed syntax or behaviour in modern Kafka:
+
+| Tool                           | Book Era                                        | Modern Kafka                                            |
+| ------------------------------ | ----------------------------------------------- | ------------------------------------------------------- |
+| `kafka-topics.sh`              | `--zookeeper` for most operations               | `--bootstrap-server` (ZooKeeper not available)          |
+| `kafka-configs.sh`             | `--zookeeper` for topic configs                 | `--bootstrap-server` for most operations                |
+| `kafka-reassign-partitions.sh` | `--zookeeper` required                          | `--bootstrap-server` preferred                          |
+| `kafka-broker-api-versions.sh` | Standalone tool                                 | Deprecated; use `kafka-cluster.sh api-versions`         |
+| `kafka-server-start.sh`        | Starts with ZK connection                       | Starts in KRaft mode (no ZK)                            |
+| `kafka-acls.sh`                | `--authorizer-properties zookeeper.connect=...` | `--bootstrap-server --command-config client.properties` |
+
+---
+
+## A.12 Config Deprecations and Removals
+
+| Deprecated/Removed Config               | Replacement / Action                                     |
+| --------------------------------------- | -------------------------------------------------------- |
+| `zookeeper.connect`                     | No replacement — KRaft mode only                         |
+| `broker.id`                             | Use `node.id`                                            |
+| `inter.broker.protocol.version`         | Managed via `metadata.version` / `kafka-features.sh`     |
+| `reserved.broker.max.id`                | Not needed in KRaft                                      |
+| `broker.id.generation.enable`           | Not needed in KRaft                                      |
+| `controlled.shutdown.*`                 | Not needed in KRaft                                      |
+| `password.encoder.*`                    | Not needed in KRaft                                      |
+| `group.coordinator.rebalance.protocols` | Managed via feature versions (`kafka-features.sh`)       |
+| `remote.log.manager.thread.pool.size`   | Use `remote.log.manager.follower.thread.pool.size`       |
+| `log.cleaner.enable`                    | Deprecated — do not set to `false`                       |
+| `kafka-streams-scala` library           | Migrate to Java Kafka Streams API (removed in Kafka 5.0) |
+
+---
+
+## A.13 Summary: Book-to-Modern Mapping
+
+| Book Chapter   | Topic                                 | Modern Change                                                                                  |
+| -------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Ch3 (§3.1–3.3) | Cluster membership, Controller, KRaft | ZooKeeper removed; KRaft only; `process.roles`, dynamic quorums                                |
+| Ch3 (§3.4)     | Replication                           | ELR feature added (Kafka 4.x)                                                                  |
+| Ch4            | Installation                          | No ZooKeeper; `kafka-storage.sh format`; Java 17+ required                                     |
+| Ch8            | Bootstrapping & Listeners             | Listener config unchanged; KRaft uses `controller.listener.names`                              |
+| Ch9            | Broker Configuration                  | `node.id` replaces `broker.id`; no `zookeeper.connect`                                         |
+| Ch10           | Client Configuration                  | New `group.protocol=consumer` for KIP-848; `isolation.level` for transactions                  |
+| Ch15           | Group Membership                      | KIP-848 Consumer protocol (GA 4.0); Share groups (GA 4.2); Streams rebalance protocol (GA 4.2) |
+| Ch18           | Transactions                          | Mostly unchanged; KIP-848 compatible                                                           |
+
+---
+
+_Refer to the official Kafka documentation in the `docs/` folder and at kafka.apache.org/documentation for complete, up-to-date details on all topics covered in this appendix._
